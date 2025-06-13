@@ -32,3 +32,7 @@ to install GMiner firmware use Toolkit, ASIC firmware should be before march 202
 
 # DevFee
 3%
+
+# Resources
+Telegram chat: https://t.me/gminer_asic <br/>
+Telegram announcements: https://t.me/gminer_releases <br/>
