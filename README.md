@@ -1,5 +1,5 @@
 # GMiner ASIC Firmware Features
-+ autotining
++ autotuning
 + profile switching by temperature
 + manual mode to adjust chip frequencies
 + support hotel fee
