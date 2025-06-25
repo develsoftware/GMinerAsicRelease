@@ -46,6 +46,9 @@ to install GMiner firmware use Toolkit, ASIC firmware should be before march 202
 3% <br/>
 There is special offer for a large farm, ask in telegram group
 
+# Promo Video
+https://youtu.be/NlGUB8cn_S8
+
 # Resources:
 Github: https://github.com/develsoftware/GMinerAsicRelease <br/>
 Telegram chat: https://t.me/gminer_asic <br/>
