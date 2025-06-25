@@ -1,13 +1,25 @@
-# GMiner ASIC Firmware Features
-+ autotuning
-+ profile switching by temperature
-+ manual mode to adjust chip frequencies
-+ support hotel fee
-+ backup and restore configuration
-+ watchdog for miner temperature and PSU voltage
-+ display power consumption
-+ support languages: english, russian
-+ night mode for web interface
+# GMiner ASIC Firmware
+
+The firmware was developed by mining experts, developers of the popular GPU miner GMINER.
+We have invested all our accumulated years of experience into developing high-quality firmware that meets all modern requirements for functionality, performance and security.
+
+# Features
++autotuning for selected overclocking profile
++automatic switching overclocking profiles by temperature
++monitoring and restoring chips performance in real time
++manual overclocking profile adjustment, fine-tuning the frequency for each chip
++management of list of autotuned overclocking profiles
++automatic and manual control of cooling, target temperature, fan speed
++watchdog for temperature sensors
++watchdog for boards overall performance 
++watchdog for PSU voltage 
++watchdog for cooling system
++reset, backup and restore configuration
++support for withholding service fee
++display of chip temperatures and power consumption
++automatic and static network settings
++interface languages: English, Russian
++day and night display mode with ability to customize
 
 # Supported Hardware
 + S19: BHB42801, BHB42803, BHB42811, BHB42821, BHB42831, BHB42841
@@ -31,8 +43,10 @@ BeagleBone, Xilinx 7007, Amlogic
 to install GMiner firmware use Toolkit, ASIC firmware should be before march 2024
 
 # DevFee
-3%
+3% <br/>
+There is special offer for a large farm, ask in telegram group
 
-# Resources
+# Resources:
+Github: https://github.com/develsoftware/GMinerAsicRelease <br/>
 Telegram chat: https://t.me/gminer_asic <br/>
 Telegram announcements: https://t.me/gminer_releases <br/>
