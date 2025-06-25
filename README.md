@@ -4,22 +4,22 @@ The firmware was developed by mining experts, developers of the popular GPU mine
 We have invested all our accumulated years of experience into developing high-quality firmware that meets all modern requirements for functionality, performance and security.
 
 # Features
-+autotuning for selected overclocking profile
-+automatic switching overclocking profiles by temperature
-+monitoring and restoring chips performance in real time
-+manual overclocking profile adjustment, fine-tuning the frequency for each chip
-+management of list of autotuned overclocking profiles
-+automatic and manual control of cooling, target temperature, fan speed
-+watchdog for temperature sensors
-+watchdog for boards overall performance 
-+watchdog for PSU voltage 
-+watchdog for cooling system
-+reset, backup and restore configuration
-+support for withholding service fee
-+display of chip temperatures and power consumption
-+automatic and static network settings
-+interface languages: English, Russian
-+day and night display mode with ability to customize
++ autotuning for selected overclocking profile
++ automatic switching overclocking profiles by temperature
++ monitoring and restoring chips performance in real time
++ manual overclocking profile adjustment, fine-tuning the frequency for each chip
++ management of list of autotuned overclocking profiles
++ automatic and manual control of cooling, target temperature, fan speed
++ watchdog for temperature sensors
++ watchdog for boards overall performance 
++ watchdog for PSU voltage 
++ watchdog for cooling system
++ reset, backup and restore configuration
++ support for withholding service fee
++ display of chip temperatures and power consumption
++ automatic and static network settings
++ interface languages: English, Russian
++ day and night display mode with ability to customize
 
 # Supported Hardware
 + S19: BHB42801, BHB42803, BHB42811, BHB42821, BHB42831, BHB42841
