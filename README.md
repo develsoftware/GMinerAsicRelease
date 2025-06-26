@@ -50,6 +50,7 @@ There is special offer for a large farm, ask in telegram group
 https://youtu.be/NlGUB8cn_S8
 
 # Resources:
+BitcoinTalk: https://bitcointalk.org/index.php?topic=5547940
 Github: https://github.com/develsoftware/GMinerAsicRelease <br/>
 Telegram chat: https://t.me/gminer_asic <br/>
 Telegram announcements: https://t.me/gminer_releases <br/>
