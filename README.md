@@ -2,8 +2,11 @@
 
 The firmware was developed by mining experts, developers of the popular GPU miner GMINER.
 We have invested all our accumulated years of experience into developing high-quality firmware that meets all modern requirements for functionality, performance and security.
+This software was developed from scratch, with its own vision of the mining process and is not a rebranding or clone.
 
 # Features
++ no penalty if commission pool is unavailable
++ one universal firmware for all supported device models
 + autotuning for selected overclocking profile
 + automatic switching overclocking profiles by temperature
 + monitoring and restoring chips performance in real time
