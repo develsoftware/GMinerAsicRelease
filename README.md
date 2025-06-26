@@ -1,7 +1,7 @@
 # GMiner ASIC Firmware
 
-The firmware was developed by mining experts, developers of the popular GPU miner GMINER. </br>
-We have invested all our accumulated years of experience into developing high-quality firmware that meets all modern requirements for functionality, performance and security. </br>
+The firmware was developed by mining experts, developers of the popular GPU miner GMINER.
+We have invested all our accumulated years of experience into developing high-quality firmware that meets all modern requirements for functionality, performance and security.
 This software was developed from scratch, with its own vision of the mining process and is not a rebranding or clone.
 
 # Features
