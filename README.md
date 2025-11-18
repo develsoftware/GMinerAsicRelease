@@ -38,9 +38,11 @@ This software was developed from scratch, with its own vision of the mining proc
 |S21|108|BM1368|BHB68601 BHB68603 BHB68606|
 |T21|108|BM1368|BHB68701 BHB68703 BHB68705|
 |S21+|55|BM1370|A3HB70701 A3HB70702 A3HB70703|
+|S21 Pro|65|BM1370|A3HB70601 A3HB70602 A3HB70603|
+|S21 XP|91|BM1370|A3HB70501 A3HB705023|
 
 # Supported Control Boards
-BeagleBone, Xilinx 7007, Amlogic
+BeagleBone, Xilinx 7007, Amlogic, Cvitek
 
 # Installation
 to install GMiner firmware use Toolkit, ASIC firmware should be before march 2024
