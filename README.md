@@ -71,7 +71,7 @@ There is special offer for a large farm, ask in telegram group
 https://youtu.be/NlGUB8cn_S8
 
 # Resources:
-Official Website: https://gminer.pro
+Official Website: https://gminer.pro <br/>
 BitcoinTalk: https://bitcointalk.org/index.php?topic=5547940 <br/>
 Github: https://github.com/develsoftware/GMinerAsicRelease <br/>
 Telegram chat: https://t.me/gminer_asic <br/>
