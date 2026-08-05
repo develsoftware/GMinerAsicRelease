@@ -63,7 +63,7 @@ This software was developed from scratch, with its own vision of the mining proc
 BeagleBone, Xilinx 7007, Amlogic, Cvitek
 
 # Installation
-to install GMiner firmware use Toolkit, ASIC firmware should be before march 2024
+to install GMiner firmware use Toolkit
 
 # DevFee
 3% <br/>
