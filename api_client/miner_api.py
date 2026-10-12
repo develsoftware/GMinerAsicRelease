@@ -8,16 +8,17 @@ miner/src/ApiServer/ApiServer.cpp):
 
   * All API calls are HTTP POST requests to http://<host>/api/<script>.cgi
   * Public (read-only) endpoints need no authentication:
-    statistics, metrics, hashboards, presets, log, log_pack
+    statistics, metrics, hashboards, presets, log, log_pack_list, log_pack_file
   * Control endpoints (config, set_config, reboot_system, update, ...)
     require a SCRAM-SHA-256 login followed by per-request HMAC-SHA-256
-    signatures (headers X-Client-Id and X-Request-HMAC).
+    v2 signatures (X-Client-Id, X-Request-Sequence and X-Request-HMAC-V2).
 
 Every JSON response uses the envelope:
   {"session_id": "...", "result": true|false, "data": ..., "error": "...",
    "error_code": 0}
 error_code values: 1 Unknown, 2 Internal, 3 NotAuthorized,
-                   4 InvalidParameters, 5 IncorrectPassword
+                   4 InvalidParameters, 5 IncorrectPassword,
+                   6 FileNotFound, 7 DownloadBusy, 8 NotAcceptable
 
 Authentication: the default panel password is "root" (it can be changed
 in the web panel; if changed, pass it via --password).
@@ -37,18 +38,28 @@ Usage examples:
 
 import argparse
 import base64
+import gzip
 import hashlib
 import hmac
+import http.client
 import json
+import os
+import re
 import secrets
 import sys
+import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
+import zipfile
+import zlib
 
 DEFAULT_PASSWORD = "root"          # factory default panel password
 DEFAULT_TIMEOUT = 5                # seconds, same as the web panel
-LONG_TIMEOUT = 180                 # seconds, used for update/backup/log_pack
+LONG_TIMEOUT = 180                 # seconds, used for updates/backups/log files
 API_PREFIX = "/api/"               # signed URI must include prefix + ".cgi"
+MAX_SEQUENCE = (1 << 64) - 1
 
 
 class ApiError(Exception):
@@ -57,10 +68,12 @@ class ApiError(Exception):
     ERROR_NAMES = {
         1: "Unknown", 2: "Internal", 3: "NotAuthorized",
         4: "InvalidParameters", 5: "IncorrectPassword",
+        6: "FileNotFound", 7: "DownloadBusy", 8: "NotAcceptable",
     }
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, http_status=None):
         self.code = code
+        self.http_status = http_status
         name = self.ERROR_NAMES.get(code, "Unknown")
         super().__init__("API error %d (%s): %s" % (code, name, message))
 
@@ -72,27 +85,46 @@ class MinerApi:
         self.base_url = "http://%s:%d%s" % (host, port, API_PREFIX)
         self.client_id = None        # base64 string from authorize1.cgi
         self.access_key = None       # raw bytes: SCRAM ClientSignature
+        self._sequence = 0
+        # Serialize the synchronous transport too: a slow upload must not fall
+        # behind 64 later requests in the server's replay window.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Low-level transport
     # ------------------------------------------------------------------
 
-    def _post(self, script, body, content_type, signed, timeout):
+    def _post(self, script, body, content_type, signed, timeout, client_id=None):
         """Send one POST request and return raw response bytes.
 
         The HMAC (when `signed` is True) is computed over the EXACT raw body
         bytes we put on the wire:
           base64(HMAC-SHA256(access_key,
-                  "POST:/api/<script>.cgi:" + hex_lower(SHA256(body))))
+                  "v2:POST:/api/<script>.cgi:<client ID>:<sequence>:" +
+                  hex_lower(SHA256(body))))
         """
+        with self._lock:
+            return self._post_locked(script, body, content_type, signed,
+                                     timeout, client_id)
+
+    def _post_locked(self, script, body, content_type, signed, timeout, client_id):
         uri = "%s%s.cgi" % (API_PREFIX, script)
         headers = {"Content-type": content_type}
+        if client_id is not None:
+            headers["X-Client-Id"] = client_id
         if signed:
-            assert self.access_key is not None, "not authorized"
+            if self.access_key is None or self.client_id is None:
+                raise ApiError(3, "authorize() is required")
+            if self._sequence == MAX_SEQUENCE:
+                raise ApiError(3, "request sequence exhausted; authorize again")
+            self._sequence += 1
+            sequence = str(self._sequence)
             body_hash = hashlib.sha256(body).hexdigest()
-            data = ("POST:%s:%s" % (uri, body_hash)).encode("utf-8")
+            data = ("v2:POST:%s:%s:%s:%s" %
+                    (uri, self.client_id, sequence, body_hash)).encode("utf-8")
             headers["X-Client-Id"] = self.client_id
-            headers["X-Request-HMAC"] = base64.b64encode(
+            headers["X-Request-Sequence"] = sequence
+            headers["X-Request-HMAC-V2"] = base64.b64encode(
                 hmac.new(self.access_key, data, hashlib.sha256).digest()
             ).decode("ascii")
 
@@ -101,24 +133,59 @@ class MinerApi:
             headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as resp:
-                return resp.read()
+                raw = resp.read()
+                if script == "log_pack_file":
+                    # urllib does not decode HTTP gzip. Decode both log formats;
+                    # octet-stream core dumps retain their compressed bytes.
+                    response_headers = getattr(resp, "headers", {})
+                    length = response_headers.get("Content-Length")
+                    if length is not None and len(raw) != int(length):
+                        raise ApiError(-1, "incomplete diagnostic file response")
+                    content_type = response_headers.get("Content-Type", "")
+                    content_type = content_type.split(";", 1)[0].strip().lower()
+                    if content_type == "application/json":
+                        self._response_data(raw)
+                        raise ApiError(2, "unexpected JSON diagnostic file response")
+                    encoding = response_headers.get("Content-Encoding", "").lower()
+                    if encoding and encoding not in ("gzip", "identity"):
+                        raise ApiError(2, "unsupported diagnostic file encoding: %s" %
+                                       encoding)
+                    if encoding == "gzip" or content_type == "application/gzip":
+                        try:
+                            raw = gzip.decompress(raw)
+                        except (OSError, EOFError, zlib.error) as e:
+                            raise ApiError(-1, "invalid gzip diagnostic file: %s" % e)
+                return raw
         except urllib.error.HTTPError as e:
-            raise ApiError(-1, "HTTP %d %s" % (e.code, e.reason))
+            try:
+                envelope = json.loads(e.read().decode("utf-8"))
+            except (ValueError, OSError):
+                envelope = {}
+            raise ApiError(envelope.get("error_code", -1),
+                           envelope.get("error", "HTTP %d %s" % (e.code, e.reason)),
+                           http_status=e.code)
         except urllib.error.URLError as e:
             raise ApiError(-1, "connection failed: %s" % e.reason)
+        except (OSError, http.client.HTTPException) as e:
+            raise ApiError(-1, "connection failed: %s" % e)
 
     def _request(self, script, params=None, binary=False, timeout=DEFAULT_TIMEOUT):
         """POST JSON (or raw bytes) and return the `data` field / raw bytes."""
-        if isinstance(params, (bytes, bytearray)):
-            raw = self._post(script, bytes(params), "application/octet-stream",
-                             signed=True, timeout=timeout)
-        else:
-            payload = json.dumps(params if params is not None else {}).encode("utf-8")
-            signed = self.access_key is not None
-            raw = self._post(script, payload, "application/json; charset=UTF-8",
-                             signed=signed, timeout=timeout)
-        if binary:
-            return raw                       # e.g. log_pack / backup_config
+        with self._lock:
+            if isinstance(params, (bytes, bytearray)):
+                raw = self._post(script, bytes(params), "application/octet-stream",
+                                 signed=True, timeout=timeout)
+            else:
+                payload = json.dumps(params if params is not None else {}).encode("utf-8")
+                signed = self.access_key is not None
+                raw = self._post(script, payload, "application/json; charset=UTF-8",
+                                 signed=signed, timeout=timeout)
+            if binary:
+                return raw                       # e.g. log_pack_file / backup_config
+            return self._response_data(raw)
+
+    @staticmethod
+    def _response_data(raw):
         envelope = json.loads(raw.decode("utf-8"))
         if not envelope.get("result"):
             raise ApiError(envelope.get("error_code", -1),
@@ -131,19 +198,50 @@ class MinerApi:
 
     def authorize(self, password):
         """Full login handshake. Stores client_id + access_key on success."""
+        with self._lock:
+            self._clear_authorization()
+            self._authorize_locked(password)
+
+    def _clear_authorization(self):
+        self.client_id = None
+        self.access_key = None
+        self._sequence = 0
+
+    @staticmethod
+    def _require_v2(data):
+        if not isinstance(data, dict) or data.get("authorization_version") != 2:
+            raise ApiError(-1, "authorization protocol v2 required")
+
+    @staticmethod
+    def _canonical_client_id(value):
+        try:
+            if not isinstance(value, str) or len(value) != 44:
+                raise ValueError()
+            decoded = base64.b64decode(value, validate=True)
+            if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ApiError(-1, "invalid client identity")
+        return value
+
+    def _authorize_locked(self, password):
         client_nonce = "".join(chr(secrets.randbelow(0x7e - 0x2d + 1) + 0x2d)
                                for _ in range(16))
         client_first = "n,,n=user,r=" + client_nonce
 
         # Step 1: ask for salt / iteration count / client id.
         data = self._request("authorize1", {"data": {"message": client_first}})
-        server_first = data["message"]
-        self.client_id = data["client_id"]
+        self._require_v2(data)
+        client_id = self._canonical_client_id(data.get("client_id"))
+        server_first = data.get("message")
 
         # Parse "r=<client+server nonce>,s=<base64 salt>,i=<iterations>".
-        parts = dict(kv.split("=", 1) for kv in server_first.split(","))
-        nonce, salt_b64, iterations = parts["r"], parts["s"], int(parts["i"])
-        if not nonce.startswith(client_nonce):
+        parts = re.fullmatch(r"r=([^,]+),s=([^,]*),i=([1-9][0-9]*)",
+                             server_first) if isinstance(server_first, str) else None
+        if parts is None:
+            raise ApiError(-1, "invalid SCRAM challenge")
+        nonce, salt_b64, iterations = parts.group(1), parts.group(2), int(parts.group(3))
+        if not nonce.startswith(client_nonce) or len(nonce) <= len(client_nonce):
             raise ApiError(-1, "server nonce mismatch")
 
         # Step 2: derive keys exactly as the web panel does.
@@ -170,26 +268,25 @@ class MinerApi:
         # NOTE: authorize2 carries X-Client-Id but intentionally no HMAC.
         msg = final_without_proof + ",p=" + base64.b64encode(proof).decode()
         payload = json.dumps({"data": {"message": msg}}).encode("utf-8")
-        headers = {"Content-type": "application/json; charset=UTF-8",
-                   "X-Client-Id": self.client_id}
-        request = urllib.request.Request(self.base_url + "authorize2.cgi",
-                                         data=payload, headers=headers,
-                                         method="POST")
-        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT) as resp:
-            envelope = json.loads(resp.read().decode("utf-8"))
-        if not envelope.get("result"):
-            raise ApiError(envelope.get("error_code", -1),
-                           envelope.get("error", "Unknown Error"))
+        raw = self._post("authorize2", payload, "application/json; charset=UTF-8",
+                         signed=False, timeout=DEFAULT_TIMEOUT, client_id=client_id)
+        data = self._response_data(raw)
+        self._require_v2(data)
 
         # Verify the server knows the password too (mutual authentication).
         server_key = hmac.new(b"Server Key", salted, hashlib.sha256).digest()
         expected = hmac.new(auth_message, server_key, hashlib.sha256).digest()
-        server_sig = envelope["data"]["message"]
-        if server_sig != "v=" + base64.b64encode(expected).decode():
+        server_sig = data.get("message")
+        expected_sig = "v=" + base64.b64encode(expected).decode("ascii")
+        if (not isinstance(server_sig, str) or
+                re.fullmatch(r"v=[A-Za-z0-9+/]{43}=", server_sig) is None or
+                not hmac.compare_digest(server_sig, expected_sig)):
             raise ApiError(-1, "server signature mismatch")
 
         # ClientSignature doubles as the session access key (TTL: 1 hour).
+        self.client_id = client_id
         self.access_key = client_signature
+        self._sequence = 0
 
     # ------------------------------------------------------------------
     # Public endpoints (no authorization needed)
@@ -215,9 +312,84 @@ class MinerApi:
         """Event log: `count` entries starting at `index`."""
         return self._request("log", {"index": int(index), "count": int(count)})
 
-    def log_pack(self):
-        """Full diagnostic archive (raw .tar.gz bytes)."""
-        return self._request("log_pack", binary=True, timeout=LONG_TIMEOUT)
+    def log_pack_list(self):
+        """Flush current logs and return diagnostic files in archive order."""
+        return self._request("log_pack_list", timeout=LONG_TIMEOUT)
+
+    def log_pack_file(self, file_id):
+        """Return one TXT log or the original compressed core dump bytes."""
+        return self._request("log_pack_file", {"id": file_id},
+                             binary=True, timeout=LONG_TIMEOUT)
+
+    @staticmethod
+    def _diagnostic_files(manifest):
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+            raise ApiError(2, "invalid diagnostic file list")
+        files = manifest["files"]
+        ids, names = set(), set()
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise ApiError(2, "invalid diagnostic file entry")
+            file_id, name = entry.get("id"), entry.get("name")
+            kind, method = entry.get("kind"), entry.get("zip_method")
+            if (not isinstance(file_id, str) or not file_id or file_id in ids or
+                    not isinstance(name, str) or not name or name in (".", "..") or
+                    "/" in name or "\\" in name or "\x00" in name or name in names or
+                    (kind, method) not in (("log", "deflate"), ("coredump", "store"))):
+                raise ApiError(2, "invalid diagnostic file entry")
+            ids.add(file_id)
+            names.add(name)
+        return files
+
+    @staticmethod
+    def _diagnostic_retryable(error):
+        return (error.code == 7 or
+                error.http_status in (408, 429, 500, 502, 503, 504) or
+                (error.code == -1 and error.http_status is None))
+
+    def _diagnostic_request(self, request, attempts):
+        for attempt in range(attempts):
+            try:
+                return request()
+            except ApiError as error:
+                if attempt + 1 == attempts or not self._diagnostic_retryable(error):
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+
+    def download_log_pack(self, output_path, attempts=3, restarts=1):
+        """Build a ZIP locally, publishing the output only after all files arrive.
+
+        Each transient request has at most `attempts` tries. A removed file
+        discards the incomplete archive and fetches a fresh manifest, at most
+        `restarts` times. Only one input file is held in memory at a time.
+        """
+        if attempts < 1 or restarts < 0:
+            raise ValueError("attempts must be positive and restarts non-negative")
+        output_path = os.path.abspath(output_path)
+        for restart in range(restarts + 1):
+            manifest = self._diagnostic_request(self.log_pack_list, attempts)
+            files = self._diagnostic_files(manifest)
+            fd, temporary_path = tempfile.mkstemp(
+                prefix=".log-pack-", suffix=".zip.tmp",
+                dir=os.path.dirname(output_path))
+            os.close(fd)
+            try:
+                with zipfile.ZipFile(temporary_path, "w", allowZip64=True) as archive:
+                    for entry in files:
+                        data = self._diagnostic_request(
+                            lambda: self.log_pack_file(entry["id"]), attempts)
+                        method = (zipfile.ZIP_STORED if entry["zip_method"] == "store"
+                                  else zipfile.ZIP_DEFLATED)
+                        archive.writestr(entry["name"], data, compress_type=method)
+                        del data
+                os.replace(temporary_path, output_path)
+                return
+            except ApiError as error:
+                if error.code != 6 or restart == restarts:
+                    raise
+            finally:
+                if os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
 
     # ------------------------------------------------------------------
     # Authorized endpoints (call authorize() first)
@@ -260,8 +432,12 @@ class MinerApi:
         return self._request("uninstall")
 
     def logout(self):
-        """Invalidate the server-side session key."""
-        return self._request("logout")
+        """Invalidate the server-side session group and forget the local key."""
+        with self._lock:
+            try:
+                return self._request("logout")
+            finally:
+                self._clear_authorization()
 
     def change_password(self, new_password):
         """Change the panel password. The session dies afterwards.
@@ -269,6 +445,12 @@ class MinerApi:
         The new password is AES-256-CBC encrypted with the session access
         key and a fixed IV (see ApiManager.ts changePassword).
         """
+        with self._lock:
+            return self._change_password_locked(new_password)
+
+    def _change_password_locked(self, new_password):
+        if self.access_key is None:
+            raise ApiError(3, "authorize() is required")
         try:
             from Crypto.Cipher import AES           # pycryptodome
             from Crypto.Util.Padding import pad
@@ -278,8 +460,10 @@ class MinerApi:
         iv = bytes.fromhex("5b4fb7715e7166f618eff3539669d87f")
         cipher = AES.new(self.access_key, AES.MODE_CBC, iv)
         encrypted = cipher.encrypt(pad(new_password.encode("utf-8"), 16))
-        return self._request("change_password",
-                             {"password": base64.b64encode(encrypted).decode()})
+        result = self._request("change_password",
+                               {"password": base64.b64encode(encrypted).decode()})
+        self._clear_authorization()
+        return result
 
 
 # ----------------------------------------------------------------------
@@ -315,8 +499,9 @@ def main():
     lg = sub.add_parser("log", help="event log (no auth)")
     lg.add_argument("--index", type=int, default=0)
     lg.add_argument("--count", type=int, default=100)
-    lp = sub.add_parser("log-pack", help="download diagnostics .tar.gz (no auth)")
-    lp.add_argument("-o", "--output", default="log_pack.tar.gz")
+    lp = sub.add_parser("log-pack",
+                        help="download diagnostics and build a ZIP (no auth)")
+    lp.add_argument("-o", "--output", default="log_pack.zip")
 
     sub.add_parser("config", parents=[pw], help="current configuration")
     sc = sub.add_parser("set-config", parents=[pw],
@@ -348,9 +533,21 @@ def main():
 
     # Commands that only touch public endpoints never need to log in.
     public = {"stats", "metrics", "hashboards", "presets", "log", "log-pack"}
-    if args.command not in public:
-        api.authorize(args.password)
+    try:
+        if args.command not in public:
+            api.authorize(args.password)
+        _run_command(api, args)
+    finally:
+        # Each CLI process owns its fresh root. Do not fill the server's
+        # bounded session table with one hour of completed script invocations.
+        if api.access_key is not None:
+            try:
+                api.logout()
+            except (ApiError, OSError, ValueError):
+                pass
 
+
+def _run_command(api, args):
     if args.command == "stats":
         _print_json(api.statistics())
     elif args.command == "metrics":
@@ -362,8 +559,7 @@ def main():
     elif args.command == "log":
         _print_json(api.log(args.index, args.count))
     elif args.command == "log-pack":
-        with open(args.output, "wb") as f:
-            f.write(api.log_pack())
+        api.download_log_pack(args.output)
         print("saved to", args.output)
     elif args.command == "config":
         _print_json(api.config())
