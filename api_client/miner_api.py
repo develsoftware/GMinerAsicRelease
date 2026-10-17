@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone Python client for the miner HTTP API.
+Standalone Python client for the GMiner 1.32 HTTP API.
 
 This script replicates exactly what the web control panel does when it talks
 to the device (see web/control_panel/src/api/ApiManager.ts and
@@ -11,7 +11,7 @@ miner/src/ApiServer/ApiServer.cpp):
     statistics, metrics, hashboards, presets, log, log_pack_list, log_pack_file
   * Control endpoints (config, set_config, reboot_system, update, ...)
     require a SCRAM-SHA-256 login followed by per-request HMAC-SHA-256
-    v2 signatures (X-Client-Id, X-Request-Sequence and X-Request-HMAC-V2).
+    signatures used by firmware 1.32 (X-Client-Id and X-Request-HMAC).
 
 Every JSON response uses the envelope:
   {"session_id": "...", "result": true|false, "data": ..., "error": "...",
@@ -23,7 +23,7 @@ error_code values: 1 Unknown, 2 Internal, 3 NotAuthorized,
 Authentication: the default panel password is "root" (it can be changed
 in the web panel; if changed, pass it via --password).
 
-Dependencies: Python 3.6+ standard library only.
+Dependencies: Python 3.7+ standard library only.
 Optional: `pycryptodome` is required ONLY for the `change-password` command
 (the new password is sent AES-256-CBC encrypted with the session access key).
 
@@ -59,7 +59,6 @@ DEFAULT_PASSWORD = "root"          # factory default panel password
 DEFAULT_TIMEOUT = 5                # seconds, same as the web panel
 LONG_TIMEOUT = 180                 # seconds, used for updates/backups/log files
 API_PREFIX = "/api/"               # signed URI must include prefix + ".cgi"
-MAX_SEQUENCE = (1 << 64) - 1
 
 
 class ApiError(Exception):
@@ -79,15 +78,13 @@ class ApiError(Exception):
 
 
 class MinerApi:
-    """Client for one miner. Create, optionally authorize(), then call."""
+    """Client for one GMiner 1.32 device. Authorize before control calls."""
 
     def __init__(self, host, port=80):
         self.base_url = "http://%s:%d%s" % (host, port, API_PREFIX)
         self.client_id = None        # base64 string from authorize1.cgi
         self.access_key = None       # raw bytes: SCRAM ClientSignature
-        self._sequence = 0
-        # Serialize the synchronous transport too: a slow upload must not fall
-        # behind 64 later requests in the server's replay window.
+        # Keep login, transport and password encryption in the same session.
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
@@ -100,7 +97,7 @@ class MinerApi:
         The HMAC (when `signed` is True) is computed over the EXACT raw body
         bytes we put on the wire:
           base64(HMAC-SHA256(access_key,
-                  "v2:POST:/api/<script>.cgi:<client ID>:<sequence>:" +
+                  "POST:/api/<script>.cgi:" +
                   hex_lower(SHA256(body))))
         """
         with self._lock:
@@ -115,18 +112,7 @@ class MinerApi:
         if signed:
             if self.access_key is None or self.client_id is None:
                 raise ApiError(3, "authorize() is required")
-            if self._sequence == MAX_SEQUENCE:
-                raise ApiError(3, "request sequence exhausted; authorize again")
-            self._sequence += 1
-            sequence = str(self._sequence)
-            body_hash = hashlib.sha256(body).hexdigest()
-            data = ("v2:POST:%s:%s:%s:%s" %
-                    (uri, self.client_id, sequence, body_hash)).encode("utf-8")
-            headers["X-Client-Id"] = self.client_id
-            headers["X-Request-Sequence"] = sequence
-            headers["X-Request-HMAC-V2"] = base64.b64encode(
-                hmac.new(self.access_key, data, hashlib.sha256).digest()
-            ).decode("ascii")
+            headers.update(self._signed_headers(uri, body))
 
         request = urllib.request.Request(
             self.base_url + script + ".cgi", data=body,
@@ -134,6 +120,13 @@ class MinerApi:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as resp:
                 raw = resp.read()
+                if script == "backup_config":
+                    response_headers = getattr(resp, "headers", {})
+                    response_type = response_headers.get("Content-Type", "")
+                    response_type = response_type.split(";", 1)[0].strip().lower()
+                    if response_type == "application/json":
+                        self._response_data(raw)
+                        raise ApiError(2, "unexpected JSON configuration backup response")
                 if script == "log_pack_file":
                     # urllib does not decode HTTP gzip. Decode both log formats;
                     # octet-stream core dumps retain their compressed bytes.
@@ -196,6 +189,13 @@ class MinerApi:
     # Authentication (SCRAM-SHA-256, same variant as the web panel)
     # ------------------------------------------------------------------
 
+    def _signed_headers(self, uri, body):
+        data = ("POST:%s:%s" % (uri, hashlib.sha256(body).hexdigest())).encode("utf-8")
+        return {"X-Client-Id": self.client_id,
+                "X-Request-HMAC": base64.b64encode(
+                    hmac.new(self.access_key, data, hashlib.sha256).digest()
+                ).decode("ascii")}
+
     def authorize(self, password):
         """Full login handshake. Stores client_id + access_key on success."""
         with self._lock:
@@ -205,12 +205,16 @@ class MinerApi:
     def _clear_authorization(self):
         self.client_id = None
         self.access_key = None
-        self._sequence = 0
 
     @staticmethod
-    def _require_v2(data):
-        if not isinstance(data, dict) or data.get("authorization_version") != 2:
-            raise ApiError(-1, "authorization protocol v2 required")
+    def _check_authorization_version(data):
+        if not isinstance(data, dict) or data.get("authorization_version", 1) != 1:
+            raise ApiError(-1, "GMiner firmware 1.32 authorization required")
+
+    @staticmethod
+    def _check_server_nonce(client_nonce, nonce):
+        if nonce[len(client_nonce):].startswith("!v2!"):
+            raise ApiError(-1, "firmware 1.31 is not supported; GMiner firmware 1.32 required")
 
     @staticmethod
     def _canonical_client_id(value):
@@ -231,7 +235,7 @@ class MinerApi:
 
         # Step 1: ask for salt / iteration count / client id.
         data = self._request("authorize1", {"data": {"message": client_first}})
-        self._require_v2(data)
+        self._check_authorization_version(data)
         client_id = self._canonical_client_id(data.get("client_id"))
         server_first = data.get("message")
 
@@ -243,6 +247,7 @@ class MinerApi:
         nonce, salt_b64, iterations = parts.group(1), parts.group(2), int(parts.group(3))
         if not nonce.startswith(client_nonce) or len(nonce) <= len(client_nonce):
             raise ApiError(-1, "server nonce mismatch")
+        self._check_server_nonce(client_nonce, nonce)
 
         # Step 2: derive keys exactly as the web panel does.
         # WARNING, non-standard SCRAM: the panel calls CryptoJS
@@ -271,7 +276,7 @@ class MinerApi:
         raw = self._post("authorize2", payload, "application/json; charset=UTF-8",
                          signed=False, timeout=DEFAULT_TIMEOUT, client_id=client_id)
         data = self._response_data(raw)
-        self._require_v2(data)
+        self._check_authorization_version(data)
 
         # Verify the server knows the password too (mutual authentication).
         server_key = hmac.new(b"Server Key", salted, hashlib.sha256).digest()
@@ -286,7 +291,6 @@ class MinerApi:
         # ClientSignature doubles as the session access key (TTL: 1 hour).
         self.client_id = client_id
         self.access_key = client_signature
-        self._sequence = 0
 
     # ------------------------------------------------------------------
     # Public endpoints (no authorization needed)
@@ -297,7 +301,7 @@ class MinerApi:
         return self._request("statistics")
 
     def metrics(self, since=0):
-        """Hashrate/temperature history arrays since unix time `since`."""
+        """Return 1h/24h history; firmware 1.32 ignores the `since` argument."""
         return self._request("metrics", {"t": int(since)})
 
     def hashboards(self):
@@ -474,9 +478,9 @@ def _print_json(obj):
     print(json.dumps(obj, indent=2, ensure_ascii=False))
 
 
-def main():
+def main(api_type=MinerApi):
     parser = argparse.ArgumentParser(
-        description="Client for the miner HTTP API (same protocol as the "
+        description="Client for the GMiner 1.32 HTTP API (same protocol as the "
                     "web control panel).")
     parser.add_argument("host", help="miner IP address or hostname")
     parser.add_argument("--port", type=int, default=80,
@@ -493,7 +497,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("stats", help="live statistics (no auth)")
     m = sub.add_parser("metrics", help="hashrate/temp history (no auth)")
-    m.add_argument("--since", type=int, default=0, help="unix timestamp")
+    m.add_argument("--since", type=int, default=0,
+                   help="unix timestamp (ignored by firmware 1.32)")
     sub.add_parser("hashboards", help="chip-level board data (no auth)")
     sub.add_parser("presets", help="available presets (no auth)")
     lg = sub.add_parser("log", help="event log (no auth)")
@@ -529,7 +534,7 @@ def main():
     sub.add_parser("logout", parents=[pw], help="invalidate the session")
 
     args = parser.parse_args()
-    api = MinerApi(args.host, args.port)
+    api = api_type(args.host, args.port)
 
     # Commands that only touch public endpoints never need to log in.
     public = {"stats", "metrics", "hashboards", "presets", "log", "log-pack"}
@@ -538,8 +543,8 @@ def main():
             api.authorize(args.password)
         _run_command(api, args)
     finally:
-        # Each CLI process owns its fresh root. Do not fill the server's
-        # bounded session table with one hour of completed script invocations.
+        # Each CLI process owns its session. Release it when the command
+        # finishes rather than leaving it authorized for one hour.
         if api.access_key is not None:
             try:
                 api.logout()
@@ -570,8 +575,9 @@ def _run_command(api, args):
         api.reset_config()
         print("configuration reset")
     elif args.command == "backup":
+        backup = api.backup_config()
         with open(args.output, "wb") as f:
-            f.write(api.backup_config())
+            f.write(backup)
         print("saved to", args.output)
     elif args.command == "restore":
         with open(args.file, "rb") as f:
